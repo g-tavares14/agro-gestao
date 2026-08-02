@@ -138,14 +138,17 @@ export function DonutCusto({
     const r = size / 2 - 6
     const cx = size / 2, cy = size / 2
     const inner = r * 0.62
-    let acc = 0
     const safeTotal = total > 0 ? total : 1
-    const arcs: Arc[] = data.map(d => {
-        const a0 = (acc / safeTotal) * Math.PI * 2
-        acc += d.value
-        const a1 = (acc / safeTotal) * Math.PI * 2
-        return { ...d, a0, a1 }
-    })
+    const arcs = data.reduce<{ acc: number; arcs: Arc[] }>((result, d) => {
+        const a0 = (result.acc / safeTotal) * Math.PI * 2
+        const nextAcc = result.acc + d.value
+        const a1 = (nextAcc / safeTotal) * Math.PI * 2
+
+        return {
+            acc: nextAcc,
+            arcs: [...result.arcs, { ...d, a0, a1 }],
+        }
+    }, { acc: 0, arcs: [] }).arcs
     const [hover, setHover] = useState<Arc | null>(null)
     // Math.sin/Math.cos podem divergir entre Node (SSR) e V8 (browser) na
     // última casa decimal — o spec do ECMAScript permite. Sem arredondar, o `d`

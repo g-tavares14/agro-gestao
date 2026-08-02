@@ -1,6 +1,6 @@
 // Apaga TODOS os dados operacionais de um usuário (culturas, custos, lançamentos,
 // registros de campo, arquivos + blobs no Vercel Blob). A linha em `users` e o
-// hash em `senhas` ficam intactos — o login continua funcionando.
+// hash em `password_credentials` ficam intactos — o login continua funcionando.
 //
 // Modo preview (não apaga nada, só mostra contagens):
 //   node --env-file=.env scripts/wipe-user.mjs <email>

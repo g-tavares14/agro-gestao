@@ -1,6 +1,6 @@
 "use client"
 
-import React, { useEffect, useMemo, useRef, useState, useActionState } from "react"
+import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore, useActionState } from "react"
 import { createPortal } from "react-dom"
 import gsap from "gsap"
 import { useGSAP } from "@gsap/react"
@@ -19,6 +19,8 @@ import {
 } from "./dashboard-charts"
 
 gsap.registerPlugin(useGSAP)
+
+const subscribeToNothing = () => () => {}
 
 type DerivedCrop = CropDashboard & {
     lucro: number
@@ -275,8 +277,11 @@ function UploadProgressOverlay({ open }: { open: boolean }) {
     // Portal pro body: assim o `position: fixed` não cai dentro de nenhum ancestral
     // com `transform` (ex.: o `.anim-upload` que ganha um inline transform da
     // entrada do GSAP), o que faria a fixagem se ancorar ao container errado.
-    const [mounted, setMounted] = useState(false)
-    useEffect(() => { setMounted(true) }, [])
+    const mounted = useSyncExternalStore(
+        subscribeToNothing,
+        () => true,
+        () => false,
+    )
     if (!mounted) return null
     return createPortal(
         <div

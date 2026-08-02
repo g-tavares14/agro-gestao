@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, useActionState } from "react";
+import { useEffect, useRef, useState, useActionState } from "react";
 import { signIn } from "next-auth/react";
 import gsap from "gsap";
 import { useGSAP } from "@gsap/react";
@@ -165,6 +165,16 @@ export default function Login() {
     const containerRef = useRef<HTMLDivElement>(null);
     const [loginState, loginDispatch] = useActionState(loginAction, null);
     const [registerState, registerDispatch] = useActionState(registerAction, null);
+    const [oauthError, setOauthError] = useState(false);
+
+    useEffect(() => {
+        const timer = window.setTimeout(() => {
+            const error = new URLSearchParams(window.location.search).get("error");
+            setOauthError(Boolean(error));
+        }, 0);
+
+        return () => window.clearTimeout(timer);
+    }, []);
 
     // Animação de entrada: painéis deslizam e campos da ilustração sobem
     useGSAP(() => {
@@ -223,9 +233,9 @@ export default function Login() {
                     <div className="anim-form-body">
                         {modo === "login" ? (
                             <form action={loginDispatch} className="space-y-3">
-                                {loginState?.error && (
+                                {(loginState?.error || oauthError) && (
                                     <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
-                                        {loginState.error}
+                                        {loginState?.error ?? "Não foi possível concluir o login. Tente outra forma de acesso."}
                                     </p>
                                 )}
                                 <input
@@ -233,6 +243,8 @@ export default function Login() {
                                     name="email"
                                     placeholder="Email"
                                     required
+                                    autoComplete="email"
+                                    maxLength={254}
                                     className="w-full border border-[#CCC5B0] rounded-xl px-4 py-3 bg-white text-[#1a1a1a] placeholder-[#B0A890] focus:outline-none focus:ring-2 focus:ring-[#4A7C2F] transition text-sm"
                                 />
                                 <input
@@ -240,6 +252,9 @@ export default function Login() {
                                     name="password"
                                     placeholder="Senha"
                                     required
+                                    autoComplete="current-password"
+                                    minLength={12}
+                                    maxLength={128}
                                     className="w-full border border-[#CCC5B0] rounded-xl px-4 py-3 bg-white text-[#1a1a1a] placeholder-[#B0A890] focus:outline-none focus:ring-2 focus:ring-[#4A7C2F] transition text-sm"
                                 />
                                 <button
@@ -270,6 +285,13 @@ export default function Login() {
                                         name={f.name}
                                         placeholder={f.placeholder}
                                         required
+                                        autoComplete={
+                                            f.name === "nome" ? "name" :
+                                            f.name === "email" ? "email" :
+                                            f.name === "password" ? "new-password" : "off"
+                                        }
+                                        minLength={f.name === "password" ? 12 : undefined}
+                                        maxLength={f.name === "email" ? 254 : f.name === "estado" ? 2 : f.name === "password" ? 128 : 120}
                                         className="w-full border border-[#CCC5B0] rounded-xl px-4 py-2.5 bg-white text-[#1a1a1a] placeholder-[#B0A890] focus:outline-none focus:ring-2 focus:ring-[#4A7C2F] transition text-sm"
                                     />
                                 ))}

@@ -23,6 +23,7 @@ O Agro-Gestão é uma aplicação web para apoiar a gestão de propriedades agr�
 - React 19 e TypeScript.
 - Tailwind CSS 4.
 - Auth.js/NextAuth para autenticação.
+- Prisma ORM com `PrismaAdapter` e adapter Neon para autenticação.
 - Neon Postgres para persistência de dados.
 - Vercel Blob para armazenamento de arquivos.
 - Google Generative AI para recursos de IA.
@@ -49,14 +50,18 @@ npm ci
 Crie um arquivo `.env.local` na raiz do projeto. Nunca versione credenciais reais:
 
 ```env
-DATABASE_URL=postgresql://usuario:senha@host/banco
+DATABASE_URL=postgresql://usuario:senha@host/banco?sslmode=require
+DIRECT_URL=postgresql://usuario:senha@host/banco?sslmode=require
 AUTH_SECRET=gere-um-segredo-longo-e-aleatorio
+AUTH_RATE_LIMIT_SECRET=outro-segredo-longo-e-aleatorio
+# Só use em produção quando houver um proxy/plataforma confiável na frente da aplicação.
+AUTH_TRUST_HOST=false
 AUTH_GOOGLE_ID=seu-client-id-do-google
 AUTH_GOOGLE_SECRET=seu-client-secret-do-google
 GEMINI_API_KEY=sua-chave-da-api-gemini
 ```
 
-As variáveis `AUTH_GOOGLE_ID` e `AUTH_GOOGLE_SECRET` são necessárias para o login com Google. `GEMINI_API_KEY` é necessária apenas para as funções que usam IA.
+`DATABASE_URL` deve apontar para a conexão pooled usada pelo runtime. `DIRECT_URL` é a conexão direta usada pelo Prisma CLI e deve ser configurada antes de validar ou gerar migrations. `AUTH_SECRET` e `AUTH_RATE_LIMIT_SECRET` são obrigatórias para o fluxo de autenticação. As variáveis `AUTH_GOOGLE_ID` e `AUTH_GOOGLE_SECRET` são necessárias para o login com Google. `GEMINI_API_KEY` é necessária apenas para as funções que usam IA.
 
 Inicie o servidor de desenvolvimento:
 
@@ -66,7 +71,7 @@ npm run dev
 
 A aplicação ficará disponível em [http://localhost:3000](http://localhost:3000).
 
-O banco precisa estar configurado antes de usar cadastro, autenticação e funcionalidades operacionais. Esta cópia do projeto não contém um arquivo de schema ou migrations versionado; a estrutura esperada do banco deve ser tratada separadamente.
+O banco precisa estar configurado antes de usar cadastro, autenticação e funcionalidades operacionais. O schema Prisma define as tabelas de autenticação e as FKs textuais relacionadas a `User.id`. O DDL operacional atual não está versionado; a alteração exata das tabelas operacionais deve ser revisada por introspecção antes da migração final. Nenhuma migration é executada pela aplicação.
 
 ## Comandos disponíveis
 
@@ -76,6 +81,12 @@ O banco precisa estar configurado antes de usar cadastro, autenticação e funci
 | `npm run build` | Gera a build de produção. |
 | `npm run start` | Inicia a aplicação em modo de produção após o build. |
 | `npm run lint` | Executa o ESLint. |
+| `npm run prisma:validate` | Valida `prisma/schema.prisma` sem alterar o banco. |
+| `npm run prisma:generate` | Gera o Prisma Client. |
+| `npm run prisma:migration:sql` | Exibe o SQL de uma comparação do schema, sem aplicar alterações. |
+| `npm run prisma:migration:create` | Cria uma migration para revisão; não deve ser executado nesta etapa. |
+
+Os comandos Prisma exigem `DIRECT_URL`. Revise todo SQL gerado e não execute `prisma migrate dev`, `prisma migrate deploy` ou `prisma db push` contra um banco real durante esta etapa.
 
 ## Scripts de banco e demonstração
 

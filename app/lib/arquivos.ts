@@ -12,7 +12,7 @@ import { db } from "./db"
 
 export type ArquivoRecord = {
     id: number
-    user_id: number
+    user_id: string
     pathname: string
     content_type: string
     original_name: string
@@ -28,7 +28,7 @@ export type StagedUpload = {
 
 export async function getArquivoForUser(
     id: number,
-    userId: string | number,
+    userId: string,
 ): Promise<ArquivoRecord | null> {
     const { rows } = await db().query(
         `SELECT id, user_id, pathname, content_type, original_name, size_bytes
@@ -40,7 +40,7 @@ export async function getArquivoForUser(
 }
 
 export async function stagePdfUpload(
-    userId: string | number,
+    userId: string,
     file: File,
     bytes: ArrayBuffer,
 ): Promise<StagedUpload> {
@@ -58,7 +58,7 @@ export async function stagePdfUpload(
 }
 
 export async function stagePhotoUpload(
-    userId: string | number,
+    userId: string,
     file: File,
     bytes: ArrayBuffer,
 ): Promise<StagedUpload> {
@@ -95,7 +95,7 @@ export async function deleteBlobsBestEffort(pathnames: string[]): Promise<void> 
 
 export async function insertArquivoRowTx(
     client: PoolClient,
-    userId: string | number,
+    userId: string,
     staged: StagedUpload,
 ): Promise<number> {
     const { rows } = await client.query(
@@ -110,7 +110,7 @@ export async function insertArquivoRowTx(
 async function getArquivoPathnameTx(
     client: PoolClient,
     arquivoId: number,
-    userId: string | number,
+    userId: string,
 ): Promise<string | null> {
     const { rows } = await client.query(
         `SELECT pathname FROM arquivos WHERE id = $1 AND user_id = $2`,
@@ -122,7 +122,7 @@ async function getArquivoPathnameTx(
 async function deleteArquivoRowTx(
     client: PoolClient,
     arquivoId: number,
-    userId: string | number,
+    userId: string,
 ): Promise<void> {
     await client.query(
         `DELETE FROM arquivos WHERE id = $1 AND user_id = $2`,
@@ -136,7 +136,7 @@ async function deleteArquivoRowTx(
 // chamador apagar os blobs após o COMMIT.
 export async function linkArquivoToCulturasTx(
     client: PoolClient,
-    userId: string | number,
+    userId: string,
     culturaIds: number[],
     staged: StagedUpload,
 ): Promise<{ arquivoId: number; oldPathnames: string[] }> {

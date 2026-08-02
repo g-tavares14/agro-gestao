@@ -34,10 +34,15 @@ export default function ProjectionCard({ cultura, areaHa, porGrupo }: Props) {
     useEffect(() => {
         const s = state?.sugestao
         if (!s) return
-        if (s.precoMedio       != null) setPreco(s.precoMedio)
-        if (s.inflacaoCustos   != null) setCInfl(s.inflacaoCustos)
-        if (s.inflacaoDespesas != null) setDInfl(s.inflacaoDespesas)
-        if (s.cargaTributaria  != null) setTaxR(s.cargaTributaria)
+
+        const timer = window.setTimeout(() => {
+            if (s.precoMedio       != null) setPreco(s.precoMedio)
+            if (s.inflacaoCustos   != null) setCInfl(s.inflacaoCustos)
+            if (s.inflacaoDespesas != null) setDInfl(s.inflacaoDespesas)
+            if (s.cargaTributaria  != null) setTaxR(s.cargaTributaria)
+        }, 0)
+
+        return () => window.clearTimeout(timer)
     }, [state?.sugestao])
 
     // Modelo paramétrico — espelha a função `Projection` do design HTML.

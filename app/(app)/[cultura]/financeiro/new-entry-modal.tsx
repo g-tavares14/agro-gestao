@@ -61,9 +61,6 @@ export default function NewEntryModal({ cultura, onClose }: Props) {
         return () => window.removeEventListener("keydown", onKey)
     }, [onClose])
 
-    // Limpa categoria quando o grupo muda
-    useEffect(() => { setCategoria("") }, [grupo])
-
     const categoriasOptions = grupo ? DRE_CATEGORIAS[grupo] : []
 
     return (
@@ -98,7 +95,10 @@ export default function NewEntryModal({ cultura, onClose }: Props) {
                         <AnimatedSelect
                             name="grupo"
                             value={grupo}
-                            onChange={v => setGrupo(isDREGrupo(v) ? v : "")}
+                            onChange={v => {
+                                setGrupo(isDREGrupo(v) ? v : "")
+                                setCategoria("")
+                            }}
                             placeholder="Selecionar grupo…"
                             options={GRUPO_OPTIONS}
                         />
