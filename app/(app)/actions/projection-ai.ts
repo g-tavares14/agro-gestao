@@ -1,8 +1,9 @@
 "use server"
 
 import { GoogleGenerativeAI } from "@google/generative-ai"
-import { db } from "@/app/lib/db"
 import { getUserId } from "@/app/lib/session"
+import { prisma } from "@/app/lib/prisma"
+import { dateOnlyToDate, decimalToNumber } from "@/app/lib/prisma-helpers"
 import { fetchCotacoesCeagesp } from "./ceagesp"
 
 // Sugestões para pré-preencher os controles paramétricos da projeção. Cada
@@ -37,20 +38,23 @@ function asNumberOrNull(v: unknown, min: number, max: number): number | null {
 }
 
 async function getHistoricoFinanceiro(userId: string, cultura: string, lookbackDays = 365) {
-    const pool = db()
     const since = new Date(Date.now() - lookbackDays * 86_400_000).toISOString().slice(0, 10)
-    const result = await pool.query(
-        `SELECT grupo, SUM(valor)::float AS total, COUNT(*)::int AS n
-         FROM lancamentos_financeiros lf
-         JOIN culturas cl ON cl.id = lf.cultura_id
-         WHERE cl.user_id = $1 AND cl.nome = $2 AND lf.data >= $3::date
-         GROUP BY grupo`,
-        [userId, cultura, since]
-    )
+    const rows = await prisma.lancamentoFinanceiro.findMany({
+        where: {
+            userId,
+            data: { gte: dateOnlyToDate(since) },
+            culture: { is: { userId, nome: cultura } },
+        },
+        select: { grupo: true, valor: true },
+    })
+    const porGrupo = new Map<string, number>()
+    for (const row of rows) {
+        porGrupo.set(row.grupo, (porGrupo.get(row.grupo) ?? 0) + decimalToNumber(row.valor))
+    }
     return {
         sinceISO: since,
-        porGrupo: Object.fromEntries(result.rows.map(r => [String(r.grupo), Number(r.total)])),
-        totalLancamentos: result.rows.reduce((s, r) => s + Number(r.n), 0),
+        porGrupo: Object.fromEntries(porGrupo),
+        totalLancamentos: rows.length,
     }
 }
 

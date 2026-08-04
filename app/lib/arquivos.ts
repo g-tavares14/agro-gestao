@@ -1,6 +1,5 @@
 import "server-only"
 import { randomUUID } from "node:crypto"
-import { type PoolClient } from "@neondatabase/serverless"
 import {
     deletePrivateFile,
     photoExtension,
@@ -8,7 +7,8 @@ import {
     validatePdf,
     validatePhoto,
 } from "./blob-storage"
-import { db } from "./db"
+import { prisma } from "./prisma"
+import type { PrismaTransaction } from "./prisma-helpers"
 
 export type ArquivoRecord = {
     id: number
@@ -30,13 +30,27 @@ export async function getArquivoForUser(
     id: number,
     userId: string,
 ): Promise<ArquivoRecord | null> {
-    const { rows } = await db().query(
-        `SELECT id, user_id, pathname, content_type, original_name, size_bytes
-         FROM arquivos
-         WHERE id = $1 AND user_id = $2`,
-        [id, userId],
-    )
-    return (rows[0] as ArquivoRecord | undefined) ?? null
+    const arquivo = await prisma.arquivo.findFirst({
+        where: { id, userId },
+        select: {
+            id: true,
+            userId: true,
+            pathname: true,
+            contentType: true,
+            originalName: true,
+            sizeBytes: true,
+        },
+    })
+
+    if (!arquivo) return null
+    return {
+        id: arquivo.id,
+        user_id: arquivo.userId,
+        pathname: arquivo.pathname,
+        content_type: arquivo.contentType,
+        original_name: arquivo.originalName,
+        size_bytes: arquivo.sizeBytes,
+    }
 }
 
 export async function stagePdfUpload(
@@ -94,48 +108,29 @@ export async function deleteBlobsBestEffort(pathnames: string[]): Promise<void> 
 }
 
 export async function insertArquivoRowTx(
-    client: PoolClient,
+    client: PrismaTransaction,
     userId: string,
     staged: StagedUpload,
 ): Promise<number> {
-    const { rows } = await client.query(
-        `INSERT INTO arquivos (user_id, pathname, content_type, original_name, size_bytes)
-         VALUES ($1, $2, $3, $4, $5)
-         RETURNING id`,
-        [userId, staged.pathname, staged.content_type, staged.original_name, staged.size_bytes],
-    )
-    return rows[0].id as number
-}
-
-async function getArquivoPathnameTx(
-    client: PoolClient,
-    arquivoId: number,
-    userId: string,
-): Promise<string | null> {
-    const { rows } = await client.query(
-        `SELECT pathname FROM arquivos WHERE id = $1 AND user_id = $2`,
-        [arquivoId, userId],
-    )
-    return (rows[0]?.pathname as string | undefined) ?? null
-}
-
-async function deleteArquivoRowTx(
-    client: PoolClient,
-    arquivoId: number,
-    userId: string,
-): Promise<void> {
-    await client.query(
-        `DELETE FROM arquivos WHERE id = $1 AND user_id = $2`,
-        [arquivoId, userId],
-    )
+    const arquivo = await client.arquivo.create({
+        data: {
+            userId,
+            pathname: staged.pathname,
+            contentType: staged.content_type,
+            originalName: staged.original_name,
+            sizeBytes: staged.size_bytes,
+        },
+        select: { id: true },
+    })
+    return arquivo.id
 }
 
 // Insere UMA linha em arquivos e aponta todas as culturas para ela, dentro da
-// transação do chamador. O SELECT ... FOR UPDATE serializa uploads concorrentes
-// da mesma cultura. Retorna os pathnames dos arquivos substituídos para o
-// chamador apagar os blobs após o COMMIT.
+// transação serializável do chamador. Conflitos de concorrência são reexecutados
+// pelo helper de transação. Retorna os pathnames dos arquivos substituídos para
+// o chamador apagar os blobs após o COMMIT.
 export async function linkArquivoToCulturasTx(
-    client: PoolClient,
+    client: PrismaTransaction,
     userId: string,
     culturaIds: number[],
     staged: StagedUpload,
@@ -144,24 +139,30 @@ export async function linkArquivoToCulturasTx(
 
     const oldIds = new Set<number>()
     for (const culturaId of culturaIds) {
-        const { rows } = await client.query(
-            `SELECT arquivo_id FROM culturas WHERE id = $1 AND user_id = $2 FOR UPDATE`,
-            [culturaId, userId],
-        )
-        if (!rows[0]) throw new Error("Cultura não encontrada.")
-        const oldId = rows[0].arquivo_id as number | null
+        const cultura = await client.cultura.findFirst({
+            where: { id: culturaId, userId },
+            select: { arquivoId: true },
+        })
+        if (!cultura) throw new Error("Cultura não encontrada.")
+        const oldId = cultura.arquivoId
         if (oldId != null && Number(oldId) !== arquivoId) oldIds.add(Number(oldId))
-        await client.query(
-            `UPDATE culturas SET arquivo_id = $1 WHERE id = $2 AND user_id = $3`,
-            [arquivoId, culturaId, userId],
-        )
+        await client.cultura.updateMany({
+            where: { id: culturaId, userId },
+            data: { arquivoId },
+        })
     }
 
     const oldPathnames: string[] = []
-    for (const oldId of oldIds) {
-        const pathname = await getArquivoPathnameTx(client, oldId, userId)
-        if (pathname) oldPathnames.push(pathname)
-        await deleteArquivoRowTx(client, oldId, userId)
+    const oldIdList = [...oldIds]
+    if (oldIdList.length > 0) {
+        const oldFiles = await client.arquivo.findMany({
+            where: { id: { in: oldIdList }, userId },
+            select: { pathname: true },
+        })
+        oldPathnames.push(...oldFiles.map(file => file.pathname))
+        await client.arquivo.deleteMany({
+            where: { id: { in: oldIdList }, userId },
+        })
     }
     return { arquivoId, oldPathnames }
 }

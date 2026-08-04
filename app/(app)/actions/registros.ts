@@ -1,8 +1,15 @@
 "use server"
 
 import { revalidatePath } from "next/cache"
-import { db, withTransaction } from "@/app/lib/db"
 import { getUserId } from "@/app/lib/session"
+import { prisma } from "@/app/lib/prisma"
+import {
+    dateOnlyToDate,
+    decimalToNumber,
+    formatDateOnlyUTC,
+    formatDateTimeUTC,
+    withSerializableTransaction,
+} from "@/app/lib/prisma-helpers"
 import {
     discardStagedUpload,
     insertArquivoRowTx,
@@ -34,31 +41,34 @@ export type RegistroItem = {
 export async function getRegistros(cultura?: string): Promise<RegistroItem[]> {
     const userId = await getUserId()
     if (!userId) return []
-    const pool = db()
-    const result = cultura
-        ? await pool.query(
-            `SELECT rc.id, cl.nome AS cultura,
-                    to_char(rc.data, 'YYYY-MM-DD') AS data,
-                    rc.operacao, rc.area_ha, rc.observacoes, rc.arquivo_id,
-                    to_char(rc.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI') AS created_at
-             FROM registros_campo rc
-             JOIN culturas cl ON rc.cultura_id = cl.id
-             WHERE rc.user_id = $1 AND cl.nome = $2
-             ORDER BY rc.data DESC, rc.created_at DESC`,
-            [userId, cultura]
-        )
-        : await pool.query(
-            `SELECT rc.id, cl.nome AS cultura,
-                    to_char(rc.data, 'YYYY-MM-DD') AS data,
-                    rc.operacao, rc.area_ha, rc.observacoes, rc.arquivo_id,
-                    to_char(rc.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI') AS created_at
-             FROM registros_campo rc
-             JOIN culturas cl ON rc.cultura_id = cl.id
-             WHERE rc.user_id = $1
-             ORDER BY rc.data DESC, rc.created_at DESC`,
-            [userId]
-        )
-    return result.rows
+    const rows = await prisma.registroCampo.findMany({
+        where: {
+            userId,
+            ...(cultura ? { culture: { is: { userId, nome: cultura } } } : {}),
+        },
+        orderBy: [{ data: "desc" }, { createdAt: "desc" }],
+        select: {
+            id: true,
+            data: true,
+            operacao: true,
+            areaHa: true,
+            observacoes: true,
+            arquivoId: true,
+            createdAt: true,
+            culture: { select: { nome: true } },
+        },
+    })
+
+    return rows.map(row => ({
+        id: row.id,
+        cultura: row.culture.nome,
+        data: formatDateOnlyUTC(row.data),
+        operacao: row.operacao,
+        area_ha: decimalToNumber(row.areaHa),
+        observacoes: row.observacoes,
+        arquivo_id: row.arquivoId,
+        created_at: formatDateTimeUTC(row.createdAt),
+    }))
 }
 
 export async function createRegistro(
@@ -87,34 +97,38 @@ export async function createRegistro(
         if (!check.ok) return { success: false, error: check.error }
     }
 
-    const pool = db()
     let staged: StagedUpload | null = null
     try {
-        const { rows } = await pool.query(
-            `SELECT id FROM culturas WHERE user_id = $1 AND nome = $2`,
-            [userId, cultura]
-        )
-        if (!rows[0]) return { success: false, error: "Cultura não encontrada." }
+        const culturaRow = await prisma.cultura.findFirst({
+            where: { userId, nome: cultura },
+            select: { id: true },
+        })
+        if (!culturaRow) return { success: false, error: "Cultura não encontrada." }
 
         if (foto) {
             staged = await stagePhotoUpload(userId, foto, await foto.arrayBuffer())
         }
         const upload = staged
 
-        await withTransaction(async (client) => {
-            const { rows: inserted } = await client.query(
-                `INSERT INTO registros_campo (user_id, cultura_id, data, operacao, area_ha, observacoes)
-                 VALUES ($1, $2, $3, $4, $5, $6)
-                 RETURNING id`,
-                [userId, rows[0].id, data, operacao, area_ha, observacoes]
-            )
+        await withSerializableTransaction(async (tx) => {
+            const inserted = await tx.registroCampo.create({
+                data: {
+                    userId,
+                    culturaId: culturaRow.id,
+                    data: dateOnlyToDate(data),
+                    operacao,
+                    areaHa: area_ha,
+                    observacoes,
+                },
+                select: { id: true },
+            })
 
             if (upload) {
-                const arquivoId = await insertArquivoRowTx(client, userId, upload)
-                await client.query(
-                    `UPDATE registros_campo SET arquivo_id = $1 WHERE id = $2 AND user_id = $3`,
-                    [arquivoId, inserted[0].id, userId]
-                )
+                const arquivoId = await insertArquivoRowTx(tx, userId, upload)
+                await tx.registroCampo.updateMany({
+                    where: { id: inserted.id, userId },
+                    data: { arquivoId },
+                })
             }
         })
 
@@ -129,25 +143,15 @@ export async function createRegistro(
 export async function getOperacoesRegistro(cultura?: string): Promise<string[]> {
     const userId = await getUserId()
     if (!userId) return []
-    const pool = db()
-    const result = cultura
-        ? await pool.query(
-            `SELECT DISTINCT c.produto
-             FROM custos c
-             JOIN culturas cl ON c.cultura_id = cl.id
-             WHERE cl.user_id = $1 AND cl.nome = $2
-               AND c.grupo IN ('Operações Mecanizadas', 'Operações Manuais')
-             ORDER BY c.produto`,
-            [userId, cultura]
-        )
-        : await pool.query(
-            `SELECT DISTINCT c.produto
-             FROM custos c
-             JOIN culturas cl ON c.cultura_id = cl.id
-             WHERE cl.user_id = $1
-               AND c.grupo IN ('Operações Mecanizadas', 'Operações Manuais')
-             ORDER BY c.produto`,
-            [userId]
-        )
-    return result.rows.map(r => r.produto as string)
+    const rows = await prisma.custo.findMany({
+        where: {
+            userId,
+            grupo: { in: ["Operações Mecanizadas", "Operações Manuais"] },
+            ...(cultura ? { culture: { is: { userId, nome: cultura } } } : {}),
+        },
+        distinct: ["produto"],
+        orderBy: { produto: "asc" },
+        select: { produto: true },
+    })
+    return rows.map(row => row.produto)
 }

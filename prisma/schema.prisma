@@ -8,17 +8,22 @@ datasource db {
 }
 
 model User {
-  id                 String              @id @default(cuid())
+  id                 String                 @id @default(cuid())
   name               String?
-  email              String              @unique
+  email              String                 @unique
   emailVerified      DateTime?
   image              String?
-  createdAt          DateTime            @default(now()) @map("created_at")
-  updatedAt          DateTime            @updatedAt @map("updated_at")
+  createdAt          DateTime               @default(now()) @map("created_at")
+  updatedAt          DateTime               @updatedAt @map("updated_at")
   accounts           Account[]
   sessions           Session[]
   passwordCredential PasswordCredential?
   properties         Property[]
+  culturas           Cultura[]
+  custos             Custo[]
+  lancamentos        LancamentoFinanceiro[]
+  registros          RegistroCampo[]
+  arquivos           Arquivo[]
   authEvents         AuthEvent[]
 
   @@map("users")
@@ -112,4 +117,105 @@ model AuthEvent {
   @@index([createdAt])
   @@index([userId])
   @@map("auth_events")
+}
+
+model Cultura {
+  id        Int      @id @default(autoincrement())
+  userId    String   @map("user_id")
+  nome      String
+  areaHa    Decimal? @map("area_ha")
+  arquivoId Int?     @map("arquivo_id")
+
+  user        User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  arquivo     Arquivo?               @relation("CulturaArquivo", fields: [arquivoId], references: [id], onDelete: SetNull)
+  custos      Custo[]                @relation("CulturaCustos")
+  lancamentos LancamentoFinanceiro[] @relation("CulturaLancamentos")
+  registros   RegistroCampo[]        @relation("CulturaRegistros")
+
+  @@unique([userId, nome])
+  @@index([userId])
+  @@index([arquivoId])
+  @@map("culturas")
+}
+
+model Custo {
+  id            Int      @id @default(autoincrement())
+  userId        String   @map("user_id")
+  culturaId     Int      @map("cultura_id")
+  cultura       String
+  produto       String
+  unidadeMedida String?  @map("unidade_medida")
+  qntEmater     Decimal? @map("qnt_emater")
+  vUnitEmater   Decimal? @map("v_unit_emater")
+  refRsHa       Decimal? @map("ref_rs_ha")
+  anoReferencia Int?     @map("ano_referencia")
+  grupo         String
+  explicacao    String?  @db.Text
+  qntReal       Decimal? @map("qnt_real")
+  vUnitReal     Decimal? @map("v_unit_real")
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  culture Cultura @relation("CulturaCustos", fields: [culturaId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([culturaId])
+  @@map("custos")
+}
+
+model LancamentoFinanceiro {
+  id          Int      @id @default(autoincrement())
+  userId      String   @map("user_id")
+  culturaId   Int      @map("cultura_id")
+  tipo        String
+  grupo       String
+  descricao   String   @db.Text
+  valor       Decimal
+  data        DateTime @db.Date
+  categoria   String?
+  observacoes String?  @db.Text
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  culture Cultura @relation("CulturaLancamentos", fields: [culturaId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([culturaId, data])
+  @@map("lancamentos_financeiros")
+}
+
+model RegistroCampo {
+  id          Int      @id @default(autoincrement())
+  userId      String   @map("user_id")
+  culturaId   Int      @map("cultura_id")
+  data        DateTime @db.Date
+  operacao    String
+  areaHa      Decimal  @map("area_ha")
+  observacoes String?  @db.Text
+  arquivoId   Int?     @map("arquivo_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  culture Cultura  @relation("CulturaRegistros", fields: [culturaId], references: [id], onDelete: Cascade)
+  arquivo Arquivo? @relation("RegistroArquivo", fields: [arquivoId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([culturaId, data])
+  @@index([arquivoId])
+  @@map("registros_campo")
+}
+
+model Arquivo {
+  id           Int    @id @default(autoincrement())
+  userId       String @map("user_id")
+  pathname     String
+  contentType  String @map("content_type")
+  originalName String @map("original_name")
+  sizeBytes    Int    @map("size_bytes")
+
+  user      User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  culturas  Cultura[]       @relation("CulturaArquivo")
+  registros RegistroCampo[] @relation("RegistroArquivo")
+
+  @@index([userId])
+  @@map("arquivos")
 }

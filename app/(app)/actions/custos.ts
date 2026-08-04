@@ -2,9 +2,13 @@
 
 import { GoogleGenerativeAI } from "@google/generative-ai"
 import { revalidatePath } from "next/cache"
-import type { Pool, PoolClient } from "@neondatabase/serverless"
-import { db, withTransaction } from "@/app/lib/db"
 import { getUserId } from "@/app/lib/session"
+import { prisma } from "@/app/lib/prisma"
+import {
+    decimalToNumber,
+    withSerializableTransaction,
+    type PrismaTransaction,
+} from "@/app/lib/prisma-helpers"
 import {
     deleteBlobsBestEffort,
     discardStagedUpload,
@@ -57,10 +61,10 @@ type ParsedCustoItem = {
     cultura: string
     produto: string
     unidade_medida: string | null
-    qnt_emater: number
-    v_unit_emater: number
-    ref_rs_ha: number
-    ano_referencia: number
+    qnt_emater: number | null
+    v_unit_emater: number | null
+    ref_rs_ha: number | null
+    ano_referencia: number | null
     grupo: string
     explicacao: string | null
 }
@@ -84,16 +88,18 @@ export type ManualFormState = {
 
 // ─── Helper interno ───────────────────────────────────────────────────────────
 
-async function upsertCultura(pool: Pool | PoolClient, userId: string | number, nome: string): Promise<number> {
-    await pool.query(
-        `INSERT INTO culturas (user_id, nome) VALUES ($1, $2) ON CONFLICT (user_id, nome) DO NOTHING`,
-        [userId, nome]
-    )
-    const { rows } = await pool.query(
-        `SELECT id FROM culturas WHERE user_id = $1 AND nome = $2`,
-        [userId, nome]
-    )
-    return rows[0].id as number
+async function upsertCultura(
+    tx: PrismaTransaction,
+    userId: string,
+    nome: string,
+): Promise<number> {
+    const cultura = await tx.cultura.upsert({
+        where: { userId_nome: { userId, nome } },
+        create: { userId, nome },
+        update: {},
+        select: { id: true },
+    })
+    return cultura.id
 }
 
 // ─── Actions ─────────────────────────────────────────────────────────────────
@@ -139,46 +145,47 @@ export async function getUpload(
         const upload = staged
 
         const nomes = [...new Set(dados.map(d => d.cultura as string))]
-        const oldPathnames = await withTransaction(async (client) => {
+        const oldPathnames = await withSerializableTransaction(async (tx) => {
             const culturaIdMap: Record<string, number> = {}
             for (const nome of nomes) {
-                culturaIdMap[nome] = await upsertCultura(client, userId, nome)
+                culturaIdMap[nome] = await upsertCultura(tx, userId, nome)
             }
 
             // Reimportar substitui os itens vindos de PDF; itens manuais
             // (sem valores de referência EMATER) são preservados.
             for (const nome of nomes) {
-                await client.query(
-                    `DELETE FROM custos
-                     WHERE cultura_id = $1 AND user_id = $2
-                       AND (v_unit_emater IS NOT NULL OR ref_rs_ha IS NOT NULL)`,
-                    [culturaIdMap[nome], userId]
-                )
+                await tx.custo.deleteMany({
+                    where: {
+                        culturaId: culturaIdMap[nome],
+                        userId,
+                        OR: [
+                            { vUnitEmater: { not: null } },
+                            { refRsHa: { not: null } },
+                        ],
+                    },
+                })
             }
 
-            for (const item of dados) {
-                await client.query(
-                    `INSERT INTO custos (user_id, cultura_id, cultura, produto, unidade_medida,
-                                        qnt_emater, v_unit_emater, ref_rs_ha, ano_referencia, grupo, explicacao)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-                    [
-                        userId,
-                        culturaIdMap[item.cultura],
-                        item.cultura,
-                        item.produto,
-                        item.unidade_medida ?? null,
-                        item.qnt_emater,
-                        item.v_unit_emater,
-                        item.ref_rs_ha,
-                        item.ano_referencia,
-                        item.grupo === "Custos Operacionais" ? "Encargos e Administrativos" : (item.grupo ?? "Insumos e Materiais"),
-                        item.explicacao ?? null,
-                    ]
-                )
-            }
+            await tx.custo.createMany({
+                data: dados.map(item => ({
+                    userId,
+                    culturaId: culturaIdMap[item.cultura],
+                    cultura: item.cultura,
+                    produto: item.produto,
+                    unidadeMedida: item.unidade_medida ?? null,
+                    qntEmater: item.qnt_emater,
+                    vUnitEmater: item.v_unit_emater,
+                    refRsHa: item.ref_rs_ha,
+                    anoReferencia: item.ano_referencia,
+                    grupo: item.grupo === "Custos Operacionais"
+                        ? "Encargos e Administrativos"
+                        : (item.grupo ?? "Insumos e Materiais"),
+                    explicacao: item.explicacao ?? null,
+                })),
+            })
 
             const culturaIds = nomes.map(nome => culturaIdMap[nome])
-            const { oldPathnames } = await linkArquivoToCulturasTx(client, userId, culturaIds, upload)
+            const { oldPathnames } = await linkArquivoToCulturasTx(tx, userId, culturaIds, upload)
             return oldPathnames
         })
 
@@ -195,37 +202,62 @@ export async function getUpload(
 export async function getCustosByCultura(cultura: string): Promise<CustoItem[]> {
     const userId = await getUserId()
     if (!userId) return []
-    const result = await db().query(
-        `SELECT c.id, c.cultura, c.produto, c.unidade_medida, c.qnt_emater, c.v_unit_emater,
-                c.ref_rs_ha, c.ano_referencia, c.grupo, c.explicacao,
-                COALESCE(c.qnt_real, c.qnt_emater) AS qnt_real,
-                COALESCE(c.v_unit_real, c.v_unit_emater) AS v_unit_real
-         FROM custos c
-         JOIN culturas cl ON c.cultura_id = cl.id
-         WHERE cl.user_id = $1 AND cl.nome = $2
-         ORDER BY c.grupo, c.produto`,
-        [userId, cultura]
-    )
-    return result.rows
+    const rows = await prisma.custo.findMany({
+        where: {
+            userId,
+            culture: { is: { userId, nome: cultura } },
+        },
+        orderBy: [{ grupo: "asc" }, { produto: "asc" }],
+        select: {
+            id: true,
+            cultura: true,
+            produto: true,
+            unidadeMedida: true,
+            qntEmater: true,
+            vUnitEmater: true,
+            refRsHa: true,
+            anoReferencia: true,
+            grupo: true,
+            explicacao: true,
+            qntReal: true,
+            vUnitReal: true,
+        },
+    })
+
+    return rows.map(row => ({
+        id: row.id,
+        cultura: row.cultura,
+        produto: row.produto,
+        unidade_medida: row.unidadeMedida,
+        qnt_emater: row.qntEmater != null ? decimalToNumber(row.qntEmater) : null,
+        v_unit_emater: row.vUnitEmater != null ? decimalToNumber(row.vUnitEmater) : null,
+        ref_rs_ha: row.refRsHa != null ? decimalToNumber(row.refRsHa) : null,
+        ano_referencia: row.anoReferencia,
+        grupo: row.grupo,
+        explicacao: row.explicacao,
+        qnt_real: row.qntReal != null
+            ? decimalToNumber(row.qntReal)
+            : row.qntEmater != null ? decimalToNumber(row.qntEmater) : null,
+        v_unit_real: row.vUnitReal != null
+            ? decimalToNumber(row.vUnitReal)
+            : row.vUnitEmater != null ? decimalToNumber(row.vUnitEmater) : null,
+    }))
 }
 
 export async function updateCusto(id: number, qnt_real: number, v_unit_real: number) {
     const userId = await getUserId()
     if (!userId) return
     if (!Number.isFinite(qnt_real) || qnt_real <= 0 || !Number.isFinite(v_unit_real) || v_unit_real <= 0) return
-    await db().query(
-        `UPDATE custos SET qnt_real = $1, v_unit_real = $2 WHERE id = $3 AND user_id = $4`,
-        [qnt_real, v_unit_real, id, userId]
-    )
+    await prisma.custo.updateMany({
+        where: { id, userId },
+        data: { qntReal: qnt_real, vUnitReal: v_unit_real },
+    })
 }
 
 export async function deleteCusto(id: number) {
     const userId = await getUserId()
     if (!userId) return
-    await db().query(
-        `DELETE FROM custos WHERE id = $1 AND user_id = $2`,
-        [id, userId]
-    )
+    await prisma.custo.deleteMany({ where: { id, userId } })
     revalidatePath("/", "layout")
 }
 
@@ -253,24 +285,31 @@ export async function addCustoManualForm(
         return { success: false, error: "Quantidade e valor unitário devem ser maiores que zero." }
     }
 
-    const pool = db()
     try {
-        const { rows } = await pool.query(
-            `SELECT id, COALESCE(area_ha, 1) AS area_ha FROM culturas WHERE user_id = $1 AND nome = $2`,
-            [userId, cultura]
-        )
-        if (!rows[0]) return { success: false, error: "Cultura não encontrada." }
+        const culturaRow = await prisma.cultura.findFirst({
+            where: { userId, nome: cultura },
+            select: { id: true, areaHa: true },
+        })
+        if (!culturaRow) return { success: false, error: "Cultura não encontrada." }
 
         // O formulário pede a quantidade total da lavoura; qnt_real guarda por hectare
         // (mesmo contrato do handleBlur da tabela, que divide pelo areaHa antes de salvar).
-        const areaHa = Number(rows[0].area_ha) > 0 ? Number(rows[0].area_ha) : 1
+        const areaHaValue = decimalToNumber(culturaRow.areaHa, 1)
+        const areaHa = areaHaValue > 0 ? areaHaValue : 1
         const qntRealPorHa = quantidade / areaHa
 
-        await pool.query(
-            `INSERT INTO custos (user_id, cultura_id, cultura, produto, unidade_medida, qnt_real, v_unit_real, grupo)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-            [userId, rows[0].id, cultura, produto, unidade_medida, qntRealPorHa, valor_unitario, grupo]
-        )
+        await prisma.custo.create({
+            data: {
+                userId,
+                culturaId: culturaRow.id,
+                cultura,
+                produto,
+                unidadeMedida: unidade_medida,
+                qntReal: qntRealPorHa,
+                vUnitReal: valor_unitario,
+                grupo,
+            },
+        })
         revalidatePath("/", "layout")
         return { success: true, error: null }
     } catch (err) {

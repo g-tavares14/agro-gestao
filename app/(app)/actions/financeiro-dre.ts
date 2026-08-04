@@ -1,8 +1,14 @@
 "use server"
 
 import { revalidatePath } from "next/cache"
-import { db } from "@/app/lib/db"
 import { getUserId } from "@/app/lib/session"
+import { prisma } from "@/app/lib/prisma"
+import {
+    dateOnlyToDate,
+    decimalToNumber,
+    formatDateOnlyUTC,
+} from "@/app/lib/prisma-helpers"
+import { costAmount, normalizeCostGroup } from "@/app/lib/operational-metrics"
 import { currentCycleStartYear, cycleBounds, cycleLabel } from "@/app/lib/cycle"
 import {
     DRE_GRUPOS,
@@ -124,17 +130,13 @@ export async function getFinanceiroDRE(
         }
     }
 
-    const pool = db()
-
     // 1) Resolve cultura (id + area) — fonte da verdade pra área plantada usada
     //    no projetor.
-    const culturaRow = await pool.query(
-        `SELECT id, COALESCE(area_ha, 1)::float AS area_ha
-         FROM culturas
-         WHERE user_id = $1 AND nome = $2`,
-        [userId, cultura]
-    )
-    if (!culturaRow.rows[0]) {
+    const culturaRow = await prisma.cultura.findFirst({
+        where: { userId, nome: cultura },
+        select: { id: true, areaHa: true },
+    })
+    if (!culturaRow) {
         return {
             cultura,
             areaHa: 1,
@@ -148,33 +150,44 @@ export async function getFinanceiroDRE(
         }
     }
 
-    const culturaId = Number(culturaRow.rows[0].id)
-    const areaHa = Number(culturaRow.rows[0].area_ha)
+    const culturaId = culturaRow.id
+    const areaHa = decimalToNumber(culturaRow.areaHa, 1)
 
     // 2) Lançamentos no intervalo + orçamento da tabela custos. Em paralelo —
     //    volume é baixo o suficiente para agregar em JS depois.
     //    O LEGACY 'Custos Operacionais' é tratado como 'Encargos e Administrativos'
     //    (mesma normalização usada em [dashboard.ts](app/(app)/actions/dashboard.ts:42)).
-    const [result, custosResult] = await Promise.all([
-        pool.query(
-            `SELECT id, grupo, categoria, descricao, valor::float AS valor,
-                    to_char(data, 'YYYY-MM-DD') AS data, observacoes
-             FROM lancamentos_financeiros
-             WHERE user_id = $1 AND cultura_id = $2
-               AND data >= $3::date AND data < $4::date
-             ORDER BY data DESC, created_at DESC`,
-            [userId, culturaId, startISO, endISO]
-        ),
-        pool.query(
-            `SELECT CASE WHEN grupo = 'Custos Operacionais' THEN 'Encargos e Administrativos'
-                         ELSE grupo END AS grupo,
-                    SUM(COALESCE(qnt_real, qnt_emater, 0)
-                      * COALESCE(v_unit_real, v_unit_emater, 0))::float AS valor_ha
-             FROM custos
-             WHERE user_id = $1 AND cultura_id = $2
-             GROUP BY 1`,
-            [userId, culturaId]
-        ),
+    const [lancamentosRows, custosRows] = await Promise.all([
+        prisma.lancamentoFinanceiro.findMany({
+            where: {
+                userId,
+                culturaId,
+                data: {
+                    gte: dateOnlyToDate(startISO),
+                    lt: dateOnlyToDate(endISO),
+                },
+            },
+            orderBy: [{ data: "desc" }, { createdAt: "desc" }],
+            select: {
+                id: true,
+                grupo: true,
+                categoria: true,
+                descricao: true,
+                valor: true,
+                data: true,
+                observacoes: true,
+            },
+        }),
+        prisma.custo.findMany({
+            where: { userId, culturaId },
+            select: {
+                grupo: true,
+                qntReal: true,
+                qntEmater: true,
+                vUnitReal: true,
+                vUnitEmater: true,
+            },
+        }),
     ])
 
     const porGrupo = emptyPorGrupo()
@@ -182,16 +195,16 @@ export async function getFinanceiroDRE(
     for (const g of DRE_GRUPOS) catMap[g] = new Map<string, number>()
 
     const lancamentos: LancamentoDRE[] = []
-    for (const r of result.rows) {
+    for (const r of lancamentosRows) {
         const g: unknown = r.grupo
         if (!isDREGrupo(g)) continue
-        const valor = Number(r.valor)
+        const valor = decimalToNumber(r.valor)
         porGrupo[g] += valor
-        const cat = (r.categoria as string | null) ?? "Sem categoria"
+        const cat = r.categoria ?? "Sem categoria"
         catMap[g].set(cat, (catMap[g].get(cat) ?? 0) + valor)
         lancamentos.push({
-            id: Number(r.id),
-            data: r.data,
+            id: r.id,
+            data: formatDateOnlyUTC(r.data),
             grupo: g,
             categoria: r.categoria,
             descricao: r.descricao,
@@ -209,9 +222,9 @@ export async function getFinanceiroDRE(
 
     // Mapeia custos.grupo → bucket da DRE e converte para total da lavoura (× area_ha).
     const orcadoPorGrupo = emptyPorGrupo()
-    for (const row of custosResult.rows) {
-        const grupo = String(row.grupo)
-        const valorTotal = Number(row.valor_ha) * areaHa
+    for (const row of custosRows) {
+        const grupo = normalizeCostGroup(row.grupo)
+        const valorTotal = decimalToNumber(costAmount(row)) * areaHa
         if (grupo === "Encargos e Administrativos") orcadoPorGrupo.despesa += valorTotal
         else if (
             grupo === "Insumos e Materiais" ||
@@ -264,21 +277,27 @@ export async function criarLancamentoDRE(
         return { success: false, error: "Valor inválido." }
     }
 
-    const pool = db()
     try {
-        const { rows } = await pool.query(
-            `SELECT id FROM culturas WHERE user_id = $1 AND nome = $2`,
-            [userId, cultura]
-        )
-        if (!rows[0]) return { success: false, error: "Cultura não encontrada." }
+        const culturaRow = await prisma.cultura.findFirst({
+            where: { userId, nome: cultura },
+            select: { id: true },
+        })
+        if (!culturaRow) return { success: false, error: "Cultura não encontrada." }
 
         const tipo = tipoFromGrupo(grupoRaw)
-        await pool.query(
-            `INSERT INTO lancamentos_financeiros
-             (user_id, cultura_id, tipo, grupo, descricao, valor, data, categoria, observacoes)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-            [userId, rows[0].id, tipo, grupoRaw, descricao, valor, data, categoria, observacoes]
-        )
+        await prisma.lancamentoFinanceiro.create({
+            data: {
+                userId,
+                culturaId: culturaRow.id,
+                tipo,
+                grupo: grupoRaw,
+                descricao,
+                valor,
+                data: dateOnlyToDate(data),
+                categoria,
+                observacoes,
+            },
+        })
         revalidatePath("/", "layout")
         return { success: true, error: null }
     } catch (err) {
@@ -292,9 +311,6 @@ export async function excluirLancamento(id: number): Promise<void> {
     const userId = await getUserId()
     if (!userId) return
     if (!Number.isFinite(id) || id <= 0) return
-    await db().query(
-        `DELETE FROM lancamentos_financeiros WHERE id = $1 AND user_id = $2`,
-        [id, userId]
-    )
+    await prisma.lancamentoFinanceiro.deleteMany({ where: { id, userId } })
     revalidatePath("/", "layout")
 }

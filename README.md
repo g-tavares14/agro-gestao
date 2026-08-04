@@ -23,7 +23,7 @@ O Agro-Gestão é uma aplicação web para apoiar a gestão de propriedades agr�
 - React 19 e TypeScript.
 - Tailwind CSS 4.
 - Auth.js/NextAuth para autenticação.
-- Prisma ORM com `PrismaAdapter` e adapter Neon para autenticação.
+- Prisma ORM com `PrismaAdapter` e adapter Neon para autenticação e runtime operacional.
 - Neon Postgres para persistência de dados.
 - Vercel Blob para armazenamento de arquivos.
 - Google Generative AI para recursos de IA.
@@ -71,7 +71,7 @@ npm run dev
 
 A aplicação ficará disponível em [http://localhost:3000](http://localhost:3000).
 
-O banco precisa estar configurado antes de usar cadastro, autenticação e funcionalidades operacionais. O schema Prisma define as tabelas de autenticação e as FKs textuais relacionadas a `User.id`. O DDL operacional atual não está versionado; a alteração exata das tabelas operacionais deve ser revisada por introspecção antes da migração final. Nenhuma migration é executada pela aplicação.
+O banco precisa estar configurado antes de usar cadastro, autenticação e funcionalidades operacionais. O schema Prisma agora descreve autenticação e as entidades operacionais usadas pelo runtime (`culturas`, `custos`, `lancamentos_financeiros`, `registros_campo` e `arquivos`). Como o DDL operacional original não está versionado, os tipos, FKs, defaults e índices devem ser comparados com uma cópia PostgreSQL descartável antes de criar ou marcar a baseline Prisma. Nenhuma migration é executada pela aplicação.
 
 ## Comandos disponíveis
 
@@ -81,12 +81,13 @@ O banco precisa estar configurado antes de usar cadastro, autenticação e funci
 | `npm run build` | Gera a build de produção. |
 | `npm run start` | Inicia a aplicação em modo de produção após o build. |
 | `npm run lint` | Executa o ESLint. |
+| `npm test` | Executa os testes unitários de valores e agregações com o test runner do Node. |
 | `npm run prisma:validate` | Valida `prisma/schema.prisma` sem alterar o banco. |
 | `npm run prisma:generate` | Gera o Prisma Client. |
 | `npm run prisma:migration:sql` | Exibe o SQL de uma comparação do schema, sem aplicar alterações. |
 | `npm run prisma:migration:create` | Cria uma migration para revisão; não deve ser executado nesta etapa. |
 
-Os comandos Prisma exigem `DIRECT_URL`. Revise todo SQL gerado e não execute `prisma migrate dev`, `prisma migrate deploy` ou `prisma db push` contra um banco real durante esta etapa.
+Os comandos Prisma exigem `DIRECT_URL`. Revise todo SQL gerado e não execute `prisma migrate dev`, `prisma migrate deploy` ou `prisma db push` contra um banco real durante esta etapa. Para a validação de integração, use uma instância PostgreSQL local descartável com `DATABASE_URL` e `DIRECT_URL` apontando para ela; SQLite não representa os tipos e transações usados pelo runtime.
 
 ## Scripts de banco e demonstração
 
@@ -116,4 +117,4 @@ node --env-file=.env scripts/wipe-user.mjs <email>
 
 ## Estado atual e próximos passos
 
-O projeto já possui o fluxo principal da aplicação e integrações com banco, autenticação, armazenamento de arquivos e IA. Ainda é necessário consolidar o schema/migrations do banco, ampliar a documentação operacional e definir uma rotina automatizada de validação antes de considerar o projeto pronto para produção.
+O projeto já possui o fluxo principal da aplicação e integrações com banco, autenticação, armazenamento de arquivos e IA. O runtime operacional usa Prisma Client; ainda é necessário comparar o schema com uma cópia fiel do PostgreSQL, gerar/revisar a baseline e executar testes de integração antes de considerar a migração pronta para produção.

@@ -1,7 +1,9 @@
 "use server"
 
-import { db } from "@/app/lib/db"
 import { getUserId } from "@/app/lib/session"
+import { prisma } from "@/app/lib/prisma"
+import { decimalToNumber } from "@/app/lib/prisma-helpers"
+import { aggregateCostsByCultura, aggregateRevenueByCultura } from "@/app/lib/operational-metrics"
 
 export interface KpiCultura {
     cultura: string
@@ -17,43 +19,40 @@ export async function getKPI(): Promise<KpiCultura[]> {
     const userId = await getUserId()
     if (!userId) return []
 
-    const { rows } = await db().query(
-        `SELECT
-            cl.nome AS cultura,
-            COALESCE(cl.area_ha, 1)::float AS area_ha,
-            COALESCE((
-                SELECT SUM(COALESCE(c.qnt_real, c.qnt_emater, 0)
-                         * COALESCE(c.v_unit_real, c.v_unit_emater, 0))
-                FROM custos c
-                WHERE c.cultura_id = cl.id
-                  AND c.grupo IN ('Operações Mecanizadas','Operações Manuais','Insumos e Materiais')
-                  -- COE = COT − encargos administrativos; tudo que não está em "Encargos e Administrativos"
-                  -- (ou no antigo "Custos Operacionais") entra aqui.
-            ), 0)::float AS coe_por_ha,
-            COALESCE((
-                SELECT SUM(COALESCE(c.qnt_real, c.qnt_emater, 0)
-                         * COALESCE(c.v_unit_real, c.v_unit_emater, 0))
-                FROM custos c
-                WHERE c.cultura_id = cl.id
-            ), 0)::float AS cot_por_ha,
-            COALESCE((
-                SELECT SUM(lf.valor)
-                FROM lancamentos_financeiros lf
-                WHERE lf.cultura_id = cl.id AND lf.tipo = 'receita'
-            ), 0)::float AS receita_bruta
-         FROM culturas cl
-         WHERE cl.user_id = $1
-         ORDER BY cl.nome`,
-        [userId]
-    )
+    const [culturas, custos, lancamentos] = await Promise.all([
+        prisma.cultura.findMany({
+            where: { userId },
+            orderBy: { nome: "asc" },
+            select: { id: true, nome: true, areaHa: true },
+        }),
+        prisma.custo.findMany({
+            where: { userId },
+            select: {
+                culturaId: true,
+                grupo: true,
+                qntReal: true,
+                qntEmater: true,
+                vUnitReal: true,
+                vUnitEmater: true,
+            },
+        }),
+        prisma.lancamentoFinanceiro.findMany({
+            where: { userId, tipo: "receita" },
+            select: { culturaId: true, valor: true },
+        }),
+    ])
 
-    return rows.map(r => {
-        const areaHa = Number(r.area_ha)
-        const coe = Number(r.coe_por_ha) * areaHa
-        const cot = Number(r.cot_por_ha) * areaHa
-        const receitaBruta = Number(r.receita_bruta)
+    const costsByCultura = aggregateCostsByCultura(custos)
+    const revenueByCultura = aggregateRevenueByCultura(lancamentos)
+
+    return culturas.map(cultura => {
+        const areaHa = decimalToNumber(cultura.areaHa, 1)
+        const costs = costsByCultura.get(cultura.id)
+        const coe = decimalToNumber(costs?.coe) * areaHa
+        const cot = decimalToNumber(costs?.cot) * areaHa
+        const receitaBruta = decimalToNumber(revenueByCultura.get(cultura.id))
         const lucro = receitaBruta - cot
         const margem = receitaBruta > 0 ? lucro / receitaBruta : 0
-        return { cultura: r.cultura, areaHa, coe, cot, receitaBruta, lucro, margem }
+        return { cultura: cultura.nome, areaHa, coe, cot, receitaBruta, lucro, margem }
     })
 }
