@@ -2,6 +2,7 @@ import "server-only"
 
 import { Prisma } from "@prisma/client"
 import { prisma } from "./prisma"
+import { isSerializableTransactionConflict } from "./prisma-errors"
 export {
     dateOnlyToDate,
     decimalToNumber,
@@ -22,10 +23,7 @@ export async function withSerializableTransaction<T>(
                 isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
             })
         } catch (error) {
-            const retryable = error instanceof Prisma.PrismaClientKnownRequestError &&
-                (error.code === "P2034" || error.code === "P2002")
-
-            if (!retryable || attempt === maxAttempts - 1) throw error
+            if (!isSerializableTransactionConflict(error) || attempt === maxAttempts - 1) throw error
         }
     }
 
